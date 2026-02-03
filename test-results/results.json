@@ -1,0 +1,525 @@
+{
+    "schema_version": "1.0",
+    "tool": "CorsRipper",
+    "summary": {
+        "targets": 8,
+        "vulnerable_targets": 5
+    },
+    "results": [
+        {
+            "url": "https://jsonplaceholder.typicode.com/posts",
+            "findings": [
+                {
+                    "id": "CORS-CREDENTIAL-REFLECTION",
+                    "severity": "CRITICAL",
+                    "title": "Origin reflected with credentials enabled",
+                    "description": "Origin reflected in ACAO while credentials are allowed",
+                    "impact": "Authenticated cross-origin data exfiltration",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://jsonplaceholder.typicode.com%5c.evil.com"
+                        ],
+                        "access-control-allow-credentials": [
+                            "true"
+                        ]
+                    },
+                    "origins": [
+                        "https://jsonplaceholder.typicode.com%5c.evil.com"
+                    ],
+                    "reasons": [
+                        "ACAO 'https://jsonplaceholder.typicode.com%5c.evil.com' accepted attacker Origin 'https://jsonplaceholder.typicode.com%5c.evil.com' while ACAC=true"
+                    ]
+                },
+                {
+                    "id": "CORS-POSTMESSAGE-CHAIN",
+                    "severity": "CRITICAL",
+                    "title": "postMessage + CORS exploit chain",
+                    "description": "postMessage triggers authenticated fetch without origin validation",
+                    "impact": "Cross-origin account data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {},
+                    "origins": [
+                        "https://jsonplaceholder.typicode.com%5c.evil.com"
+                    ],
+                    "reasons": [
+                        "postMessage triggered authenticated cross-origin fetch from 'https://jsonplaceholder.typicode.com%5c.evil.com'"
+                    ]
+                },
+                {
+                    "id": "CORS-BROWSER-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "Browser-confirmed credentialed CORS exploit",
+                    "description": "Exploit validated via real browser fetch with credentials",
+                    "impact": "Confirmed cross-origin data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "browser": [
+                            "playwright"
+                        ],
+                        "escalates": [
+                            "CORS-CREDENTIAL-REFLECTION"
+                        ]
+                    },
+                    "origins": [
+                        "https://jsonplaceholder.typicode.com%5c.evil.com"
+                    ],
+                    "reasons": [
+                        "Browser successfully read authenticated response cross-origin from 'https://jsonplaceholder.typicode.com%5c.evil.com'"
+                    ]
+                }
+            ],
+            "skipped_origins": []
+        },
+        {
+            "url": "https://httpbin.org/get",
+            "findings": [
+                {
+                    "id": "CORS-CACHE-POISONING-POTENTIAL",
+                    "severity": "HIGH",
+                    "title": "CORS cache poisoning risk",
+                    "description": "Dynamic Access-Control-Allow-Origin without Vary: Origin",
+                    "impact": "Shared caches may serve attacker-controlled ACAO to other users",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://httpbin.org:443@evil.com"
+                        ],
+                        "vary": [
+                            ""
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Dynamic ACAO 'https://httpbin.org:443@evil.com' returned without 'Vary: Origin'"
+                    ]
+                },
+                {
+                    "id": "CORS-CACHE-POISONING-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "CORS cache poisoning confirmed",
+                    "description": "Injected Origin persisted in ACAO response",
+                    "impact": "Authenticated cross-origin data leakage to arbitrary origins",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "poison_origin": [
+                            "https://cache-3789.evil.com"
+                        ],
+                        "access-control-allow-origin": [
+                            "https://cache-3789.evil.com"
+                        ]
+                    },
+                    "origins": [
+                        "https://cache-3789.evil.com"
+                    ],
+                    "reasons": [
+                        "Injected Origin 'https://cache-3789.evil.com' was persisted in ACAO response"
+                    ]
+                },
+                {
+                    "id": "CORS-CREDENTIAL-REFLECTION",
+                    "severity": "CRITICAL",
+                    "title": "Origin reflected with credentials enabled",
+                    "description": "Origin reflected in ACAO while credentials are allowed",
+                    "impact": "Authenticated cross-origin data exfiltration",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://httpbin.org:443@evil.com"
+                        ],
+                        "access-control-allow-credentials": [
+                            "true"
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "ACAO 'https://httpbin.org:443@evil.com' accepted attacker Origin 'https://httpbin.org:443@evil.com' while ACAC=true"
+                    ]
+                },
+                {
+                    "id": "CORS-POSTMESSAGE-CHAIN",
+                    "severity": "CRITICAL",
+                    "title": "postMessage + CORS exploit chain",
+                    "description": "postMessage triggers authenticated fetch without origin validation",
+                    "impact": "Cross-origin account data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {},
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "postMessage triggered authenticated cross-origin fetch from 'https://httpbin.org:443@evil.com'"
+                    ]
+                },
+                {
+                    "id": "CORS-BROWSER-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "Browser-confirmed credentialed CORS exploit",
+                    "description": "Exploit validated via real browser fetch with credentials",
+                    "impact": "Confirmed cross-origin data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "browser": [
+                            "playwright"
+                        ],
+                        "escalates": [
+                            "CORS-CREDENTIAL-REFLECTION"
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Browser successfully read authenticated response cross-origin from 'https://httpbin.org:443@evil.com'"
+                    ]
+                }
+            ],
+            "skipped_origins": []
+        },
+        {
+            "url": "https://httpbin.org/anything",
+            "findings": [
+                {
+                    "id": "CORS-CACHE-POISONING-POTENTIAL",
+                    "severity": "HIGH",
+                    "title": "CORS cache poisoning risk",
+                    "description": "Dynamic Access-Control-Allow-Origin without Vary: Origin",
+                    "impact": "Shared caches may serve attacker-controlled ACAO to other users",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://httpbin.org:443@evil.com"
+                        ],
+                        "vary": [
+                            ""
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Dynamic ACAO 'https://httpbin.org:443@evil.com' returned without 'Vary: Origin'"
+                    ]
+                },
+                {
+                    "id": "CORS-CACHE-POISONING-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "CORS cache poisoning confirmed",
+                    "description": "Injected Origin persisted in ACAO response",
+                    "impact": "Authenticated cross-origin data leakage to arbitrary origins",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "poison_origin": [
+                            "https://cache-8667.evil.com"
+                        ],
+                        "access-control-allow-origin": [
+                            "https://cache-8667.evil.com"
+                        ]
+                    },
+                    "origins": [
+                        "https://cache-8667.evil.com"
+                    ],
+                    "reasons": [
+                        "Injected Origin 'https://cache-8667.evil.com' was persisted in ACAO response"
+                    ]
+                },
+                {
+                    "id": "CORS-CREDENTIAL-REFLECTION",
+                    "severity": "CRITICAL",
+                    "title": "Origin reflected with credentials enabled",
+                    "description": "Origin reflected in ACAO while credentials are allowed",
+                    "impact": "Authenticated cross-origin data exfiltration",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://httpbin.org:443@evil.com"
+                        ],
+                        "access-control-allow-credentials": [
+                            "true"
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "ACAO 'https://httpbin.org:443@evil.com' accepted attacker Origin 'https://httpbin.org:443@evil.com' while ACAC=true"
+                    ]
+                },
+                {
+                    "id": "CORS-POSTMESSAGE-CHAIN",
+                    "severity": "CRITICAL",
+                    "title": "postMessage + CORS exploit chain",
+                    "description": "postMessage triggers authenticated fetch without origin validation",
+                    "impact": "Cross-origin account data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {},
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "postMessage triggered authenticated cross-origin fetch from 'https://httpbin.org:443@evil.com'"
+                    ]
+                },
+                {
+                    "id": "CORS-BROWSER-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "Browser-confirmed credentialed CORS exploit",
+                    "description": "Exploit validated via real browser fetch with credentials",
+                    "impact": "Confirmed cross-origin data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "browser": [
+                            "playwright"
+                        ],
+                        "escalates": [
+                            "CORS-CREDENTIAL-REFLECTION"
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Browser successfully read authenticated response cross-origin from 'https://httpbin.org:443@evil.com'"
+                    ]
+                }
+            ],
+            "skipped_origins": []
+        },
+        {
+            "url": "https://httpbin.org/headers",
+            "findings": [
+                {
+                    "id": "CORS-CACHE-POISONING-POTENTIAL",
+                    "severity": "HIGH",
+                    "title": "CORS cache poisoning risk",
+                    "description": "Dynamic Access-Control-Allow-Origin without Vary: Origin",
+                    "impact": "Shared caches may serve attacker-controlled ACAO to other users",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://httpbin.org:443@evil.com"
+                        ],
+                        "vary": [
+                            ""
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Dynamic ACAO 'https://httpbin.org:443@evil.com' returned without 'Vary: Origin'"
+                    ]
+                },
+                {
+                    "id": "CORS-CACHE-POISONING-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "CORS cache poisoning confirmed",
+                    "description": "Injected Origin persisted in ACAO response",
+                    "impact": "Authenticated cross-origin data leakage to arbitrary origins",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "poison_origin": [
+                            "https://cache-1602.evil.com"
+                        ],
+                        "access-control-allow-origin": [
+                            "https://cache-1602.evil.com"
+                        ]
+                    },
+                    "origins": [
+                        "https://cache-1602.evil.com"
+                    ],
+                    "reasons": [
+                        "Injected Origin 'https://cache-1602.evil.com' was persisted in ACAO response"
+                    ]
+                },
+                {
+                    "id": "CORS-CREDENTIAL-REFLECTION",
+                    "severity": "CRITICAL",
+                    "title": "Origin reflected with credentials enabled",
+                    "description": "Origin reflected in ACAO while credentials are allowed",
+                    "impact": "Authenticated cross-origin data exfiltration",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://httpbin.org:443@evil.com"
+                        ],
+                        "access-control-allow-credentials": [
+                            "true"
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "ACAO 'https://httpbin.org:443@evil.com' accepted attacker Origin 'https://httpbin.org:443@evil.com' while ACAC=true"
+                    ]
+                },
+                {
+                    "id": "CORS-POSTMESSAGE-CHAIN",
+                    "severity": "CRITICAL",
+                    "title": "postMessage + CORS exploit chain",
+                    "description": "postMessage triggers authenticated fetch without origin validation",
+                    "impact": "Cross-origin account data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {},
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "postMessage triggered authenticated cross-origin fetch from 'https://httpbin.org:443@evil.com'"
+                    ]
+                },
+                {
+                    "id": "CORS-BROWSER-CONFIRMED",
+                    "severity": "CRITICAL",
+                    "title": "Browser-confirmed credentialed CORS exploit",
+                    "description": "Exploit validated via real browser fetch with credentials",
+                    "impact": "Confirmed cross-origin data exfiltration",
+                    "confirmed": true,
+                    "exploitability": "confirmed",
+                    "evidence": {
+                        "browser": [
+                            "playwright"
+                        ],
+                        "escalates": [
+                            "CORS-CREDENTIAL-REFLECTION"
+                        ]
+                    },
+                    "origins": [
+                        "https://httpbin.org:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Browser successfully read authenticated response cross-origin from 'https://httpbin.org:443@evil.com'"
+                    ]
+                }
+            ],
+            "skipped_origins": []
+        },
+        {
+            "url": "https://cors-test.codehappy.dev/",
+            "findings": [
+                {
+                    "id": "CORS-CACHE-POISONING-POTENTIAL",
+                    "severity": "HIGH",
+                    "title": "CORS cache poisoning risk",
+                    "description": "Dynamic Access-Control-Allow-Origin without Vary: Origin",
+                    "impact": "Shared caches may serve attacker-controlled ACAO to other users",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "https://htmlcsstoimage.com"
+                        ],
+                        "vary": [
+                            "accept-encoding"
+                        ]
+                    },
+                    "origins": [
+                        "https://cors-test.codehappy.dev:443@evil.com"
+                    ],
+                    "reasons": [
+                        "Dynamic ACAO 'https://htmlcsstoimage.com' returned without 'Vary: Origin'"
+                    ]
+                },
+                {
+                    "id": "CORS-CDN-CACHE-POISONING",
+                    "severity": "MEDIUM",
+                    "title": "CORS cache poisoning via cloudflare",
+                    "description": "Dynamic ACAO without Vary: Origin on CDN-backed endpoint (no credentials)",
+                    "impact": "Public or unauthenticated cross-origin data may be cached and reused",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "cdn": [
+                            "cloudflare"
+                        ],
+                        "access-control-allow-origin": [
+                            "https://htmlcsstoimage.com"
+                        ],
+                        "vary": [
+                            "accept-encoding"
+                        ]
+                    },
+                    "origins": [
+                        "https://cors-test.codehappy.dev:443@evil.com"
+                    ],
+                    "reasons": [
+                        "CDN 'cloudflare' served dynamic ACAO 'https://htmlcsstoimage.com' without 'Vary: Origin'"
+                    ]
+                }
+            ],
+            "skipped_origins": [
+                "https://trusted.com\u3002"
+            ]
+        },
+        {
+            "url": "https://cors-anywhere.herokuapp.com/",
+            "findings": [
+                {
+                    "id": "CORS-WILDCARD-NO-CREDS",
+                    "severity": "INFO",
+                    "title": "Wildcard Access-Control-Allow-Origin without credentials",
+                    "description": "Server allows any origin but does not permit credentials",
+                    "impact": "Public cross-origin read access (low risk)",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {
+                        "access-control-allow-origin": [
+                            "*"
+                        ]
+                    },
+                    "origins": [],
+                    "reasons": [
+                        "ACAO='*' allows all origins without credential restriction"
+                    ]
+                }
+            ],
+            "skipped_origins": [
+                "https://trusted.com\u3002"
+            ]
+        },
+        {
+            "url": "https://cors.badssl.com/",
+            "findings": [
+                {
+                    "id": "TLS-VALIDATION-FAILED",
+                    "severity": "INFO",
+                    "title": "TLS validation failure",
+                    "description": "TLS certificate validation failed, request retried without verification",
+                    "impact": "Possible internal CA or self-signed certificate",
+                    "confirmed": false,
+                    "exploitability": "theoretical",
+                    "evidence": {},
+                    "origins": [],
+                    "reasons": [
+                        "TLS certificate validation failed when connecting to 'https://cors.badssl.com/'"
+                    ]
+                }
+            ],
+            "skipped_origins": [
+                "https://trusted.com\u3002"
+            ]
+        }
+    ]
+}
