@@ -1,0 +1,8 @@
+https://cors-anywhere.herokuapp.com/
+https://httpbin.org/get
+https://httpbin.org/anything
+https://httpbin.org/headers
+https://postman-echo.com/get
+https://jsonplaceholder.typicode.com/posts
+https://cors.badssl.com/
+https://cors-test.codehappy.dev/
