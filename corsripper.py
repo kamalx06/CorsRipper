@@ -15,6 +15,7 @@ from playwright.sync_api import sync_playwright
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict
 
+
 @dataclass
 class Finding:
     id: str
@@ -34,10 +35,11 @@ class Finding:
         if self.reasons:
             d["reasons"] = self.reasons
         return d
-        
+
     def __post_init__(self):
         if self.reasons is None:
             self.reasons = []
+
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -131,16 +133,39 @@ SENSITIVE_HEADERS = {
     "x-amz-security-token",
 }
 
-SENSITIVE_REGEX = re.compile(r"(jwt|bearer\s+[a-z0-9\-_.=]+|access[_-]?token|refresh[_-]?token|api[_-]?key|password|email)",re.I)
-OAUTH_REGEX = re.compile(r"(access_token|id_token|refresh_token|expires_in|token_type)",re.I)
+# ACCURACY: only match real secret material, not generic words such as "email"
+# or "password" that appear on every login page. This drops the vast majority
+# of "CORS-SENSITIVE-*" false positives while keeping true positives.
+SENSITIVE_REGEX = re.compile(
+    r"("
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"      # JWT
+    r"|\bBearer\s+[A-Za-z0-9\-_.=]{16,}"                                   # Bearer token
+    r"|\"(?:access|refresh|id)[_-]?token\"\s*:\s*\"[^\"]{8,}\""            # token JSON
+    r"|\"api[_-]?key\"\s*:\s*\"[^\"]{8,}\""
+    r"|\"client[_-]?secret\"\s*:\s*\"[^\"]{4,}\""
+    r"|\"password\"\s*:\s*\"[^\"]{4,}\""
+    r"|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"                # real email
+    r")",
+    re.I,
+)
+
+# ACCURACY: OAuth detection now requires the actual JSON key:value pattern,
+# not just the presence of the word "access_token" in the body.
+OAUTH_REGEX = re.compile(
+    r"\"(access_token|id_token|refresh_token|token_type)\"\s*:\s*\""
+    r"|\"expires_in\"\s*:\s*\d+",
+    re.I,
+)
 
 TIMEOUT = (5, 10)
 MAX_THREADS = 50
 DEBUG = False
 
+
 def dbg(*args):
     if DEBUG:
         print("[DEBUG]", *args, flush=True)
+
 
 def debug_request_response(resp, *args, **kwargs):
     dbg(
@@ -154,10 +179,12 @@ def debug_request_response(resp, *args, **kwargs):
     )
     return resp
 
+
 def normalize_urls(url):
     if url.startswith("http://") or url.startswith("https://"):
         return [url]
     return [f"https://{url}", f"http://{url}"]
+
 
 def generate_dynamic_origins(url):
     parsed = urlparse(url)
@@ -178,6 +205,7 @@ def generate_dynamic_origins(url):
         f"https://{host}\u0000.evil.com",
     }
 
+
 def generate_parser_confusion_origins(host):
     return {
         f"https://{host}..evil.com",
@@ -190,6 +218,7 @@ def generate_parser_confusion_origins(host):
         f"https://{host}#@evil.com",
     }
 
+
 def detect_cdn(headers):
     for cdn, sigs in CDN_HEADERS.items():
         for h in sigs:
@@ -197,39 +226,86 @@ def detect_cdn(headers):
                 return cdn
     return None
 
-def structured_data_detector(text):
-    keywords = ["id", "user", "email", "token", "role", "account"]
-    return sum(k in text.lower() for k in keywords) >= 3
 
-def strict_origin_equal(acao, origin):
+# ACCURACY: replaced keyword counting on raw text with a real JSON walk that
+# only counts sensitive keys inside structured objects.
+_STRUCTURED_SENSITIVE_KEYS = {
+    "id", "userid", "user_id", "user", "username", "email",
+    "token", "access_token", "refresh_token", "id_token",
+    "api_key", "apikey", "role", "roles", "account", "account_id",
+    "session", "session_id", "auth", "auth_token", "password",
+    "secret", "client_secret",
+}
+
+
+def structured_data_detector(text):
+    text = text.strip()
+    if not text or text[0] not in "{[":
+        return False
     try:
-        a = urlparse(acao)
-        o = urlparse(origin)
-        return (
-            a.scheme == o.scheme and
-            a.hostname == o.hostname and
-            (a.port or 443) == (o.port or 443)
-        )
+        data = json.loads(text)
     except Exception:
         return False
 
+    found = 0
+
+    def walk(obj):
+        nonlocal found
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(k, str) and k.lower() in _STRUCTURED_SENSITIVE_KEYS:
+                    found += 1
+                walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
+    return found >= 3
+
+
+def _default_port(scheme: str) -> int:
+    return 443 if scheme == "https" else 80
+
+
+def strict_origin_equal(acao, origin):
+    """
+    Exact origin equivalence matching the browser's CORS rules:
+    scheme, hostname and effective port must match byte-for-byte
+    (default ports 443/80 are treated as equivalent to explicit ones).
+    """
+    try:
+        a = urlparse(acao.strip())
+        o = urlparse(origin.strip())
+        if a.scheme != o.scheme:
+            return False
+        if a.hostname != o.hostname:
+            return False
+        a_port = a.port if a.port is not None else _default_port(a.scheme)
+        o_port = o.port if o.port is not None else _default_port(o.scheme)
+        return a_port == o_port
+    except Exception:
+        return False
+
+
 def origin_accepted_by_server(acao, origin):
+    """
+    True only when the server's ACAO would actually be accepted by a
+    browser for the given Origin. `null` only matches a literal null
+    origin. No subdomain-suffix shortcuts.
+    """
     if not acao or not origin:
         return False
 
-    if acao in {"*", "null"}:
-        return True
+    acao = acao.strip()
 
-    try:
-        a = urlparse(acao)
-        o = urlparse(origin)
-        if strict_origin_equal(acao, origin):
-            return True
-        if a.hostname and o.hostname and o.hostname.endswith("." + a.hostname):
-            return True
-        return False
-    except Exception:
-        return False
+    if acao == "*":
+        return True
+    if acao == "null":
+        return origin.strip() == "null"
+
+    return strict_origin_equal(acao, origin)
+
 
 def header_safe(value: str) -> bool:
     try:
@@ -238,17 +314,87 @@ def header_safe(value: str) -> bool:
     except UnicodeEncodeError:
         return False
 
-def is_probable_json(resp):
+
+def is_probable_json(resp, max_size=2_000_000):
+    # ACCURACY: avoid parsing giant payloads; also require Content-Type to look
+    # JSON-ish or the body to start with a JSON token before parsing.
+    try:
+        content = resp.content or b""
+    except Exception:
+        content = b""
+    if len(content) > max_size:
+        return False
+    ct = (resp.headers.get("Content-Type") or "").lower()
+    stripped = (resp.text or "").lstrip()
+    if "json" not in ct and not stripped.startswith(("{", "[")):
+        return False
     try:
         json.loads(resp.text)
         return True
     except Exception:
         return False
 
+
+def _is_real_jsonp(body: str, cb: str) -> bool:
+    """
+    Validate that a JSONP response is genuine: starts with the callback
+    invocation and wraps a payload that actually parses as JSON.
+    """
+    if not body.startswith(cb + "("):
+        return False
+    inner = body[len(cb) + 1:].rstrip()
+    if inner.endswith(";"):
+        inner = inner[:-1].rstrip()
+    if inner.endswith(")"):
+        inner = inner[:-1]
+    try:
+        json.loads(inner)
+        return True
+    except Exception:
+        return False
+
+
+# ACCURACY: new helpers used to avoid reporting cache-poisoning on responses
+# that shared caches would never store in the first place.
+_CACHE_NO_STORE_TOKENS = ("no-store", "private", "no-cache")
+
+
+def response_is_cacheable(headers: Dict[str, str]) -> bool:
+    h = {k.lower(): (v or "").lower() for k, v in headers.items()}
+    cc = h.get("cache-control", "")
+    pragma = h.get("pragma", "")
+    if any(tok in cc for tok in _CACHE_NO_STORE_TOKENS):
+        return False
+    if "no-cache" in pragma:
+        return False
+    # Explicitly cacheable directives
+    if any(tok in cc for tok in ("public", "max-age", "s-maxage")):
+        return True
+    if "expires" in h:
+        return True
+    # Heuristically cacheable status codes without explicit directives
+    return True
+
+
+def served_from_cache(headers: Dict[str, str]) -> bool:
+    h = {k.lower(): (v or "") for k, v in headers.items()}
+    xcache = h.get("x-cache", "").lower()
+    if "hit" in xcache and "miss" not in xcache:
+        return True
+    cf = h.get("cf-cache-status", "").lower()
+    if cf in {"hit", "revalidated", "stale"}:
+        return True
+    age = h.get("age")
+    if age and age.isdigit() and int(age) > 0:
+        return True
+    return False
+
+
 def build_poison_headers(headers, poison_origin):
     poisoned = headers.copy()
     poisoned["Origin"] = poison_origin
     return poisoned
+
 
 def build_session(proxy=None):
     session = requests.Session()
@@ -256,7 +402,7 @@ def build_session(proxy=None):
     adapter = requests.adapters.HTTPAdapter(
         pool_connections=50,
         pool_maxsize=50,
-        max_retries=2
+        max_retries=2,
     )
 
     session.mount("http://", adapter)
@@ -270,6 +416,7 @@ def build_session(proxy=None):
     session.hooks["response"].append(debug_request_response)
     return session
 
+
 def send_request(
     session,
     url,
@@ -278,7 +425,8 @@ def send_request(
     data=None,
     verify=False,
     allow_redirects=False,
-    profile=None):
+    profile=None,
+):
 
     final_headers = {}
 
@@ -291,11 +439,12 @@ def send_request(
     if profile and profile.get("delay"):
         time.sleep(random.uniform(*profile["delay"]))
 
-    dbg("REQUEST",
+    dbg(
+        "REQUEST",
         "method=", method,
         "url=", url,
         "verify=", verify,
-        "headers=", final_headers
+        "headers=", final_headers,
     )
 
     resp = session.request(
@@ -308,7 +457,8 @@ def send_request(
         allow_redirects=allow_redirects,
     )
 
-    dbg("RESPONSE",
+    dbg(
+        "RESPONSE",
         "status=", resp.status_code,
         "final_url=", resp.url,
         "ACAO=", resp.headers.get("Access-Control-Allow-Origin"),
@@ -317,6 +467,7 @@ def send_request(
     )
 
     return resp
+
 
 def browser_checker():
     try:
@@ -331,6 +482,7 @@ def browser_checker():
             "        playwright install chromium\n"
         )
         sys.exit(2)
+
 
 def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None):
     session = build_session(proxy)
@@ -367,7 +519,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
         confirmed=False,
         exploitability="theoretical",
         evidence=None,
-        reason=None
+        reason=None,
     ):
         nonlocal findings
 
@@ -411,21 +563,21 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                 reasons=[reason] if reason else [],
             )
         )
-        
+
     profile = None
     for origin in all_origins:
         if not header_safe(origin):
             skipped_origins.add(origin)
             continue
         time.sleep(random.uniform(0.1, 0.7))
-        headers = {"Origin": origin,"User-Agent": random.choice(USER_AGENTS)}
+        headers = {"Origin": origin, "User-Agent": random.choice(USER_AGENTS)}
 
         if base_request:
             for k, v in base_request["headers"].items():
                 lk = k.lower()
                 if lk not in {"origin", "content-length", "host"}:
                     headers[k] = v
-                
+
         effective_data = (
             data if method.upper() in {"POST", "PUT", "PATCH"} else None
         )
@@ -439,7 +591,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                     data=effective_data,
                     verify=True,
                     allow_redirects=False,
-                    profile=profile
+                    profile=profile,
                 )
 
             except requests.exceptions.SSLError:
@@ -460,7 +612,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                     data=effective_data,
                     verify=False,
                     allow_redirects=False,
-                    profile=profile
+                    profile=profile,
                 )
 
             try:
@@ -496,11 +648,11 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                     exploitability="potential",
                     evidence={"final_url": r.url},
                 )
-            
+
             cdn = detect_cdn({k.lower(): v for k, v in r.headers.items()})
             if cdn in WAF_PROFILES:
                 profile = WAF_PROFILES[cdn]
-            ct = r.headers.get("Content-Type", "").lower() 
+            ct = r.headers.get("Content-Type", "").lower()
             acao = r.headers.get("Access-Control-Allow-Origin", "").strip()
             acac = r.headers.get("Access-Control-Allow-Credentials", "").lower()
             acah = r.headers.get("Access-Control-Allow-Headers", "").lower()
@@ -510,15 +662,14 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
             cache_control = r.headers.get("Cache-Control", "").lower()
             pragma = r.headers.get("Pragma", "").lower()
 
+            # ACCURACY: gate cache-poisoning "potential" on the response being
+            # actually cacheable by a shared cache (respect Cache-Control).
             if (
                 not cache_poisoning_reported
                 and acao
                 and acao != "*"
                 and "origin" not in vary_headers
-                and "no-store" not in cache_control
-                and "no-cache" not in cache_control
-                and "private" not in cache_control
-                and r.headers.get("Pragma", "").lower() != "no-cache"
+                and response_is_cacheable(r.headers)
                 and ("text/html" in ct or "json" in ct)
             ):
 
@@ -576,7 +727,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         },
                     )
                 if acac == "true":
-                    poison_origin = f"https://cache-{random.randint(1000,9999)}.evil.com"
+                    poison_origin = f"https://cache-{random.randint(1000, 9999)}.evil.com"
                     poison_headers = build_poison_headers(headers, poison_origin)
                     try:
                         pr = send_request(
@@ -587,27 +738,58 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                             data=effective_data,
                             verify=False,
                             allow_redirects=False,
-                            profile=profile
+                            profile=profile,
                         )
 
                         poisoned_acao = pr.headers.get("Access-Control-Allow-Origin", "")
 
+                        # ACCURACY: previous logic confirmed "cache poisoning"
+                        # on any origin reflection. Now we additionally require
+                        # either an actual cache-hit indicator OR that a fresh
+                        # benign-Origin request returns the poisoned ACAO.
                         if poison_origin in poisoned_acao:
-                            add(
-                                fid="CORS-CACHE-POISONING-CONFIRMED",
-                                severity="CRITICAL",
-                                title="CORS cache poisoning confirmed",
-                                description="Injected Origin persisted in ACAO response",
-                                impact="Authenticated cross-origin data leakage to arbitrary origins",
-                                origin=poison_origin,
-                                confirmed=True,
-                                reason=f"Injected Origin '{poison_origin}' was persisted in ACAO response",
-                                exploitability="confirmed",
-                                evidence={
-                                    "poison_origin": poison_origin,
-                                    "access-control-allow-origin": poisoned_acao,
-                                },
-                            )
+                            reflected_from_cache = served_from_cache(pr.headers)
+
+                            # Follow-up with a benign Origin to detect a poisoned cache entry.
+                            benign_origin = f"https://benign-{random.randint(1000, 9999)}.example.com"
+                            benign_headers = build_poison_headers(headers, benign_origin)
+                            try:
+                                br = send_request(
+                                    session,
+                                    url,
+                                    headers=benign_headers,
+                                    method=method,
+                                    data=effective_data,
+                                    verify=False,
+                                    allow_redirects=False,
+                                    profile=profile,
+                                )
+                                benign_acao = br.headers.get("Access-Control-Allow-Origin", "")
+                                poisoned_cache_replay = (
+                                    poison_origin in benign_acao
+                                    and poison_origin not in benign_acao.replace(poison_origin, "")
+                                ) and (benign_origin not in benign_acao)
+                            except Exception:
+                                poisoned_cache_replay = False
+
+                            if reflected_from_cache or poisoned_cache_replay:
+                                add(
+                                    fid="CORS-CACHE-POISONING-CONFIRMED",
+                                    severity="CRITICAL",
+                                    title="CORS cache poisoning confirmed",
+                                    description="Injected Origin persisted in ACAO response",
+                                    impact="Authenticated cross-origin data leakage to arbitrary origins",
+                                    origin=poison_origin,
+                                    confirmed=True,
+                                    reason=f"Injected Origin '{poison_origin}' was persisted in ACAO response",
+                                    exploitability="confirmed",
+                                    evidence={
+                                        "poison_origin": poison_origin,
+                                        "access-control-allow-origin": poisoned_acao,
+                                        "served_from_cache": str(reflected_from_cache),
+                                        "poisoned_cache_replay": str(poisoned_cache_replay),
+                                    },
+                                )
                     except Exception:
                         pass
 
@@ -618,7 +800,13 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                     title="Wildcard ACAO with credentials enabled",
                     description="Server allows credentials with Access-Control-Allow-Origin: *",
                     impact="Authenticated cross-origin data theft",
-                    confirmed=True,
+                    confirmed=False,
+                    reason=(
+                        f"ACAO='*' returned together with ACAC=true. Browsers "
+                        f"block this by spec, but the server-side config is unsafe "
+                        f"and will break if the browser policy changes."
+                    ),
+                    exploitability="potential",
                     evidence={
                         "access-control-allow-origin": acao,
                         "access-control-allow-credentials": acac,
@@ -643,6 +831,8 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
             if (
                 OAUTH_REGEX.search(r.text)
                 and acac == "true"
+                and acao
+                and acao != "*"
                 and origin_accepted_by_server(acao, origin)
                 and ("json" in ct or r.text.strip().startswith("{"))
             ):
@@ -667,12 +857,13 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         impact="Attacker can bind victim session to attacker OAuth client",
                         reason=f"OAuth token exchange endpoint accessible cross-origin for Origin '{origin}'",
                         exploitability="potential",
-                        origin=origin
+                        origin=origin,
                     )
 
             if (
                 acac == "true"
                 and acao
+                and acao != "*"
                 and origin_accepted_by_server(acao, origin)
             ):
                 add(
@@ -719,8 +910,8 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         exploitability="potential",
                         evidence={
                             "methods": acam,
-                            "credentials": acac
-                        }
+                            "credentials": acac,
+                        },
                     )
 
                 if (
@@ -740,12 +931,17 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         evidence={"auth": "cookie"},
                     )
 
+            # ---------------------------------------------------------------
+            # Browser-based confirmation. Runs only for a per-origin
+            # reflection (wildcard is handled by CORS-WILDCARD-CREDS above).
+            # ---------------------------------------------------------------
             if (
                 enable_browser_confirm
                 and not browser_confirmed
                 and not browser_attempted
                 and acac == "true"
                 and acao
+                and acao != "*"
                 and origin_accepted_by_server(acao, origin)
             ):
                 try:
@@ -795,12 +991,15 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         and browser_result.get("timing_with_creds") is not None
                         and browser_result.get("timing_without_creds") is not None
                     ):
-                        delta = abs(
-                            browser_result["timing_with_creds"]
-                            - browser_result["timing_without_creds"]
-                        )
+                        t_cred = browser_result["timing_with_creds"]
+                        t_no = browser_result["timing_without_creds"]
+                        delta = abs(t_cred - t_no)
+                        max_t = max(t_cred, t_no, 1.0)
+                        ratio = delta / max_t
 
-                        if delta >= 300:
+                        # ACCURACY: require both a large absolute delta AND a
+                        # substantial ratio to reduce random-jitter false positives.
+                        if delta >= 500 and ratio >= 0.5:
                             add(
                                 fid="CORS-TIMING-SIDE-CHANNEL",
                                 severity="CRITICAL",
@@ -809,12 +1008,13 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                                 impact="Cross-origin inference of authenticated state",
                                 origin=origin,
                                 confirmed=True,
-                                reason=f"Timing difference of {round(delta,2)}ms observed between credentialed and uncredentialed requests",
+                                reason=f"Timing difference of {round(delta, 2)}ms observed between credentialed and uncredentialed requests",
                                 exploitability="confirmed",
                                 evidence={
-                                    "timing_with_creds_ms": round(browser_result["timing_with_creds"], 2),
-                                    "timing_without_creds_ms": round(browser_result["timing_without_creds"], 2),
+                                    "timing_with_creds_ms": round(t_cred, 2),
+                                    "timing_without_creds_ms": round(t_no, 2),
                                     "timing_delta_ms": round(delta, 2),
+                                    "timing_ratio": round(ratio, 3),
                                 },
                             )
                         else:
@@ -843,38 +1043,48 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         evidence={"error": str(e)},
                     )
 
-                if browser_confirmed:
-                    break
+            # Stop scanning further origins once a real browser confirms.
+            if browser_confirmed:
+                break
 
-                if sensitive:
-                    if json_like and structured:
-                        add(
-                            fid="CORS-SENSITIVE-STRUCTURED-DATA",
-                            severity="CRITICAL",
-                            title="Structured sensitive API data exposed via CORS",
-                            description="Response contains structured sensitive data accessible cross-origin",
-                            impact="Exposure of user identifiers, tokens, or account data",
-                            origin=origin,
-                            confirmed=False,
-                            reason=f"Structured sensitive data returned cross-origin for Origin '{origin}'",
-                            exploitability="potential",
-                        )
-                    else:
-                        add(
-                            fid="CORS-SENSITIVE-UNSTRUCTURED-DATA",
-                            severity="HIGH",
-                            title="Sensitive data exposed via CORS",
-                            description="Response contains sensitive information accessible cross-origin",
-                            impact="Potential leakage of secrets or personal data",
-                            origin=origin,
-                            confirmed=False,
-                            reason=f"Sensitive response content returned cross-origin for Origin '{origin}'",
-                            exploitability="potential",
-                        )
+            # ---------------------------------------------------------------
+            # Sensitive-data disclosure (independent of --browser-confirm).
+            # ---------------------------------------------------------------
+            if (
+                acac == "true"
+                and acao
+                and acao != "*"
+                and origin_accepted_by_server(acao, origin)
+                and sensitive
+            ):
+                if json_like and structured:
+                    add(
+                        fid="CORS-SENSITIVE-STRUCTURED-DATA",
+                        severity="CRITICAL",
+                        title="Structured sensitive API data exposed via CORS",
+                        description="Response contains structured sensitive data accessible cross-origin",
+                        impact="Exposure of user identifiers, tokens, or account data",
+                        origin=origin,
+                        confirmed=False,
+                        reason=f"Structured sensitive data returned cross-origin for Origin '{origin}'",
+                        exploitability="potential",
+                    )
+                else:
+                    add(
+                        fid="CORS-SENSITIVE-UNSTRUCTURED-DATA",
+                        severity="HIGH",
+                        title="Sensitive data exposed via CORS",
+                        description="Response contains sensitive information accessible cross-origin",
+                        impact="Potential leakage of secrets or personal data",
+                        origin=origin,
+                        confirmed=False,
+                        reason=f"Sensitive response content returned cross-origin for Origin '{origin}'",
+                        exploitability="potential",
+                    )
 
-            elif (
+            if (
                 origin_accepted_by_server(acao, origin)
-                and not acac == "true"
+                and acac != "true"
                 and (sensitive or structured)
             ):
                 add(
@@ -888,13 +1098,26 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                     reason=f"ACAO '{acao}' accepted attacker Origin '{origin}' without allowing credentials",
                     exploitability="theoretical",
                 )
-                adaptive_origins = {origin + ".evil.com",origin + "%00.evil.com",origin + "\t.evil.com"}
+                adaptive_origins = {
+                    origin + ".evil.com",
+                    origin + "%00.evil.com",
+                    origin + "\t.evil.com",
+                }
                 for a_origin in adaptive_origins:
                     test_headers = dict(headers) if isinstance(headers, list) else headers.copy()
                     test_headers["Origin"] = a_origin
 
                     try:
-                        r2 = send_request(session,url,headers=test_headers,method=method,data=effective_data,verify=False,allow_redirects=False,profile=profile)
+                        r2 = send_request(
+                            session,
+                            url,
+                            headers=test_headers,
+                            method=method,
+                            data=effective_data,
+                            verify=False,
+                            allow_redirects=False,
+                            profile=profile,
+                        )
                         a_acao = r2.headers.get("Access-Control-Allow-Origin", "")
                         if origin_accepted_by_server(a_acao, a_origin):
                             add(
@@ -926,6 +1149,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                             exploitability="potential",
                             evidence={"header": h},
                         )
+
             if origin_accepted_by_server(acao, origin):
                 for m in ["put", "post", "delete", "patch", "trace", "track"]:
                     if m in acam and (acac == "true" or sensitive):
@@ -949,7 +1173,16 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
 
         if not browser_confirmed:
             try:
-                r_redirect = send_request(session,url,headers=headers,method=method,data=effective_data,verify=False,allow_redirects=True,profile=profile)
+                r_redirect = send_request(
+                    session,
+                    url,
+                    headers=headers,
+                    method=method,
+                    data=effective_data,
+                    verify=False,
+                    allow_redirects=True,
+                    profile=profile,
+                )
 
                 history = r_redirect.history
 
@@ -984,19 +1217,35 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
 
             except Exception:
                 pass
-        
+
         if acao:
             for pf_method, req_header in PREFLIGHT_SCENARIOS:
                 try:
-                    pf_headers = {**headers,"Access-Control-Request-Method": pf_method,"Access-Control-Request-Headers": req_header}
-                    r = session.options(url,headers=pf_headers,timeout=TIMEOUT,verify=False)
+                    pf_headers = {
+                        **headers,
+                        "Access-Control-Request-Method": pf_method,
+                        "Access-Control-Request-Headers": req_header,
+                    }
+                    r = session.options(
+                        url,
+                        headers=pf_headers,
+                        timeout=TIMEOUT,
+                        verify=False,
+                    )
+                    pf_status = r.status_code
                     pf_acao = r.headers.get("Access-Control-Allow-Origin", "").strip()
                     pf_acam = r.headers.get("Access-Control-Allow-Methods", "").lower()
                     pf_acah = r.headers.get("Access-Control-Allow-Headers", "").lower()
                     pf_acac = r.headers.get("Access-Control-Allow-Credentials", "").lower()
 
+                    # ACCURACY: require a valid 2xx preflight response before
+                    # treating the preflight as permissive. Some servers emit
+                    # CORS headers even on 4xx, which browsers ignore.
+                    preflight_ok = 200 <= pf_status < 300
+
                     if (
-                        pf_acac == "true"
+                        preflight_ok
+                        and pf_acac == "true"
                         and origin_accepted_by_server(pf_acao, origin)
                         and pf_method.lower() in pf_acam
                         and req_header.lower() in pf_acah
@@ -1019,7 +1268,8 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         )
 
                     if (
-                        pf_method == "POST"
+                        preflight_ok
+                        and pf_method == "POST"
                         and req_header.lower() == "content-type"
                         and "post" in pf_acam
                         and "content-type" in pf_acah
@@ -1032,7 +1282,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         try:
                             gql_headers = {
                                 **headers,
-                                "Content-Type": "application/json"
+                                "Content-Type": "application/json",
                             }
 
                             r_gql = send_request(
@@ -1043,7 +1293,7 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                                 data=json.dumps(graphql_probe),
                                 verify=False,
                                 allow_redirects=False,
-                                profile=profile
+                                profile=profile,
                             )
 
                             if "__schema" in r_gql.text:
@@ -1059,12 +1309,12 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                                     exploitability="confirmed",
                                     evidence={
                                         "preflight_methods": pf_acam,
-                                        "preflight_headers": pf_acah
-                                    }
+                                        "preflight_headers": pf_acah,
+                                    },
                                 )
                         except Exception:
                             pass
-                    if pf_acao == "*" and pf_acac == "true":
+                    if preflight_ok and pf_acao == "*" and pf_acac == "true":
                         add(
                             fid="CORS-PREFLIGHT-WILDCARD-CREDS",
                             severity="CRITICAL",
@@ -1083,12 +1333,20 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
                         continue
 
     try:
-        r = send_request(session,f"{url}?callback=JSONP_TEST123",method="GET",verify=False,profile=profile)
+        r = send_request(
+            session,
+            f"{url}?callback=JSONP_TEST123",
+            method="GET",
+            verify=False,
+            profile=profile,
+        )
         ct = r.headers.get("Content-Type", "").lower()
         body = r.text.strip()
 
-        if (ct.startswith(("application/javascript", "text/javascript")) and body.startswith("JSONP_TEST123(") 
-        and "callback=JSONP_TEST123" in r.url):
+        if (
+            ct.startswith(("application/javascript", "text/javascript"))
+            and _is_real_jsonp(body, "JSONP_TEST123")
+        ):
             add(
                 fid="CORS-JSONP-ENABLED",
                 severity="HIGH",
@@ -1114,69 +1372,123 @@ def check_cors(url, enable_browser_confirm=False, base_request=None, proxy=None)
         }
     return None
 
+
 def browser_cors_confirm(browser, url, origin):
-    context = browser.new_context(
-        extra_http_headers={"Origin": origin},
-        ignore_https_errors=True
-    )
-    page = context.new_page()
+    """
+    Confirm a credentialed CORS reflection in a real browser.
 
-    result = page.evaluate(
-        """async (url) => {
-            try {
-                let postMessageLeak = false;
-                window.addEventListener("message", e => {
-                    try {
-                        fetch(url, {
+    Instead of trying to spoof the `Origin` header (which Chromium treats
+    as forbidden for programmatic requests), we serve a bootstrap page
+    from the attacker origin via a route handler and evaluate the fetch
+    from there. The browser then genuinely sends `Origin: <origin>`.
+    """
+    context = browser.new_context(ignore_https_errors=True)
+
+    def _handler(route):
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=f"<html><body>CorsRipper bootstrap for {origin}</body></html>",
+        )
+
+    try:
+        try:
+            context.route(f"{origin}/**", _handler)
+        except Exception:
+            pass
+
+        page = context.new_page()
+
+        try:
+            page.goto(
+                f"{origin}/corsripper-bootstrap",
+                wait_until="domcontentloaded",
+                timeout=8000,
+            )
+        except Exception:
+            pass
+
+        # ACCURACY: sample multiple times and use medians so a single slow
+        # request does not produce a false timing-side-channel finding.
+        result = page.evaluate(
+            """async (url) => {
+                try {
+                    let postMessageLeak = false;
+                    window.addEventListener("message", e => {
+                        try {
+                            fetch(url, {
+                                credentials: "include",
+                                mode: "cors"
+                            })
+                            .then(r => r.text())
+                            .then(() => { postMessageLeak = true; });
+                        } catch (e) {}
+                    });
+                    window.postMessage("corsripper-test", "*");
+                    await new Promise(r => setTimeout(r, 800));
+
+                    const controller = new AbortController();
+                    setTimeout(() => controller.abort(), 15000);
+
+                    const samples = 5;
+                    const withCreds = [];
+                    const noCreds = [];
+                    let firstResp = null;
+
+                    for (let i = 0; i < samples; i++) {
+                        const t1 = performance.now();
+                        const r1 = await fetch(url, {
                             credentials: "include",
-                            mode: "cors"
-                        })
-                        .then(r => r.text())
-                        .then(() => { postMessageLeak = true; });
-                    } catch (e) {}
-                });
-                window.postMessage("corsripper-test", "*");
-                await new Promise(r => setTimeout(r, 1000));
-                const controller = new AbortController();
-                setTimeout(() => controller.abort(), 7000);
-                const startCred = performance.now();
-                const responseCred = await fetch(url, {
-                    credentials: "include",
-                    mode: "cors",
-                    signal: controller.signal
-                });
-                const endCred = performance.now();
-                let text = null;
-                try { text = await responseCred.text(); } catch {}
-                const startNoCred = performance.now();
-                await fetch(url, {
-                    credentials: "omit",
-                    mode: "cors"
-                });
-                const endNoCred = performance.now();
-                return {
-                    ok: responseCred.ok,
-                    status: responseCred.status,
-                    type: responseCred.type,
-                    redirected: responseCred.redirected,
-                    body_readable: text !== null,
-                    opaque: responseCred.type === "opaque",
-                    timing_with_creds: endCred - startCred,
-                    timing_without_creds: endNoCred - startNoCred,
-                    postmessage_leak: postMessageLeak
-                };
-            } catch (e) {
-                return {
-                    ok: false,
-                    error: e.toString()
-                };
-            }
-        }""",
-        url
-    )
+                            mode: "cors",
+                            signal: controller.signal
+                        });
+                        const t2 = performance.now();
+                        if (i === 0) firstResp = r1;
+                        withCreds.push(t2 - t1);
 
-    context.close()
+                        const t3 = performance.now();
+                        await fetch(url, {
+                            credentials: "omit",
+                            mode: "cors"
+                        });
+                        const t4 = performance.now();
+                        noCreds.push(t4 - t3);
+                    }
+
+                    const median = arr => {
+                        const s = [...arr].sort((a, b) => a - b);
+                        const n = s.length;
+                        return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+                    };
+
+                    let text = null;
+                    try { text = await firstResp.text(); } catch {}
+
+                    return {
+                        ok: firstResp.ok,
+                        status: firstResp.status,
+                        type: firstResp.type,
+                        redirected: firstResp.redirected,
+                        body_readable: text !== null,
+                        opaque: firstResp.type === "opaque",
+                        timing_with_creds: median(withCreds),
+                        timing_without_creds: median(noCreds),
+                        postmessage_leak: postMessageLeak
+                    };
+                } catch (e) {
+                    return {
+                        ok: false,
+                        error: e.toString()
+                    };
+                }
+            }""",
+            url,
+        )
+    finally:
+        context.close()
+
     return result
+
 
 def test_websocket_origin(url, origin):
     parsed = urlparse(url)
@@ -1187,6 +1499,8 @@ def test_websocket_origin(url, origin):
     port = parsed.port or (443 if ws_scheme == "wss" else 80)
     host = parsed.hostname
     path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
 
     key = base64.b64encode(os.urandom(16)).decode()
 
@@ -1201,20 +1515,30 @@ def test_websocket_origin(url, origin):
     )
 
     sock = socket.create_connection((host, port), timeout=5)
-    if ws_scheme == "wss":
-        ctx = ssl.create_default_context()
-        sock = ctx.wrap_socket(sock, server_hostname=host)
-
-    sock.send(req.encode())
-    resp = sock.recv(4096).decode(errors="ignore")
-    sock.close()
+    try:
+        if ws_scheme == "wss":
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        sock.settimeout(5)
+        sock.send(req.encode())
+        try:
+            resp = sock.recv(4096).decode(errors="ignore")
+        except socket.timeout:
+            resp = ""
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
     return "101 Switching Protocols" in resp
+
 
 def load_urls(file_path):
     with open(file_path, "r") as f:
         return [line.strip() for line in f if line.strip()]
-        
+
+
 def parse_burp_request(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = [l.rstrip("\n") for l in f]
@@ -1251,15 +1575,19 @@ def main():
     requests.packages.urllib3.disable_warnings()
 
     parser = argparse.ArgumentParser(description="CorsRipper")
-    parser.add_argument("url", nargs="?",help="URL to scan")
-    parser.add_argument("-u", "--urls",help="File with URLs")
-    parser.add_argument("-o", "--output",help="JSON output file")
-    parser.add_argument("--browser-confirm",action="store_true",help="Confirm exploitable CORS with Playwright")
-    parser.add_argument("-r", "--request",help="Load raw HTTP request from file (Burp format)")
-    parser.add_argument("--proxy",help="Proxy URL (http://, https://, socks5://, socks5h:// for Tor)")
-    parser.add_argument("--debug",action="store_true",help="Enable verbose debugging output for requests")
+    parser.add_argument("url", nargs="?", help="URL to scan")
+    parser.add_argument("-u", "--urls", help="File with URLs")
+    parser.add_argument("-o", "--output", help="JSON output file")
+    parser.add_argument("--browser-confirm", action="store_true",
+                        help="Confirm exploitable CORS with Playwright")
+    parser.add_argument("-r", "--request",
+                        help="Load raw HTTP request from file (Burp format)")
+    parser.add_argument("--proxy",
+                        help="Proxy URL (http://, https://, socks5://, socks5h:// for Tor)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable verbose debugging output for requests")
     args = parser.parse_args()
-    
+
     global DEBUG
     DEBUG = args.debug
 
@@ -1267,7 +1595,7 @@ def main():
         urls.extend(normalize_urls(args.url))
     if args.urls:
         urls.extend(load_urls(args.urls))
-    
+
     if args.browser_confirm:
         browser_checker()
 
@@ -1283,7 +1611,10 @@ def main():
     print(f"Scanning {len(urls)} URLs with {workers} threads")
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(check_cors, u, args.browser_confirm, base_request, args.proxy): u for u in urls}
+            futures = {
+                executor.submit(check_cors, u, args.browser_confirm, base_request, args.proxy): u
+                for u in urls
+            }
             for future in as_completed(futures):
                 result = future.result()
                 if result:
@@ -1296,7 +1627,7 @@ def main():
                         summary.setdefault(fid, {
                             "severity": f["severity"],
                             "title": f["title"],
-                            "count": 0
+                            "count": 0,
                         })
                         summary[fid]["count"] += 1
 
@@ -1330,6 +1661,7 @@ def main():
                 f,
                 indent=4,
             )
+
 
 if __name__ == "__main__":
     main()
